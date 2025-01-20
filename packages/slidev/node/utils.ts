@@ -1,66 +1,15 @@
-import { join } from 'node:path'
-import { createRequire } from 'node:module'
+import type { ResolvedFontOptions, SlideInfo } from '@slidev/types'
+import type { Token } from 'markdown-it'
+import type { Connect } from 'vite'
 import { fileURLToPath } from 'node:url'
-import { ensurePrefix, slash } from '@antfu/utils'
-import isInstalledGlobally from 'is-installed-globally'
-import { resolvePath } from 'mlly'
-import globalDirs from 'global-directory'
-import type Token from 'markdown-it/lib/token'
-import type { ResolvedFontOptions } from '@slidev/types'
+import { createJiti } from 'jiti'
+import YAML from 'yaml'
 
-const require = createRequire(import.meta.url)
-
-export function toAtFS(path: string) {
-  return `/@fs${ensurePrefix('/', slash(path))}`
-}
-
-export async function resolveImportPath(importName: string, ensure: true): Promise<string>
-export async function resolveImportPath(importName: string, ensure?: boolean): Promise<string | undefined>
-export async function resolveImportPath(importName: string, ensure = false) {
-  try {
-    return resolvePath(importName, {
-      url: fileURLToPath(import.meta.url),
-    })
-  }
-  catch {}
-
-  if (isInstalledGlobally) {
-    try {
-      return require.resolve(join(globalDirs.yarn.packages, importName))
-    }
-    catch {}
-
-    try {
-      return require.resolve(join(globalDirs.npm.packages, importName))
-    }
-    catch {}
-  }
-
-  if (ensure)
-    throw new Error(`Failed to resolve package "${importName}"`)
-
-  return undefined
-}
-
-export async function resolveGlobalImportPath(importName: string): Promise<string> {
-  try {
-    return resolvePath(importName, {
-      url: fileURLToPath(import.meta.url),
-    })
-  }
-  catch {}
-
-  try {
-    return require.resolve(join(globalDirs.yarn.packages, importName))
-  }
-  catch {}
-
-  try {
-    return require.resolve(join(globalDirs.npm.packages, importName))
-  }
-  catch {}
-
-  throw new Error(`Failed to resolve global package "${importName}"`)
+type Jiti = ReturnType<typeof createJiti>
+let jiti: Jiti | undefined
+export function loadModule<T = unknown>(absolutePath: string): Promise<T> {
+  jiti ??= createJiti(fileURLToPath(import.meta.url))
+  return jiti.import(absolutePath) as Promise<T>
 }
 
 export function stringifyMarkdownTokens(tokens: Token[]) {
@@ -84,8 +33,56 @@ export function generateGoogleFontsUrl(options: ResolvedFontOptions) {
   return `https://fonts.googleapis.com/css2?${fonts}&display=swap`
 }
 
-export async function packageExists(name: string) {
-  if (await resolveImportPath(`${name}/package.json`))
-    return true
-  return false
+/**
+ * Update frontmatter patch and preserve the comments
+ */
+export function updateFrontmatterPatch(slide: SlideInfo, frontmatter: Record<string, any>) {
+  const source = slide.source
+  let doc = source.frontmatterDoc
+  if (!doc) {
+    source.frontmatterStyle = 'frontmatter'
+    source.frontmatterDoc = doc = new YAML.Document({})
+  }
+  for (const [key, value] of Object.entries(frontmatter)) {
+    slide.frontmatter[key] = source.frontmatter[key] = value
+    if (value == null) {
+      doc.delete(key)
+    }
+    else {
+      const valueNode = doc.createNode(value)
+      let found = false
+      YAML.visit(doc.contents, {
+        Pair(_key, node, path) {
+          if (path.length === 1 && YAML.isScalar(node.key) && node.key.value === key) {
+            node.value = valueNode
+            found = true
+            return YAML.visit.BREAK
+          }
+        },
+      })
+      if (!found) {
+        if (!YAML.isMap(doc.contents))
+          doc.contents = doc.createNode({})
+        doc.contents.add(
+          doc.createPair(key, valueNode),
+        )
+      }
+    }
+  }
+}
+
+export function getBodyJson(req: Connect.IncomingMessage) {
+  return new Promise<any>((resolve, reject) => {
+    let body = ''
+    req.on('data', chunk => body += chunk)
+    req.on('error', reject)
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body) || {})
+      }
+      catch (e) {
+        reject(e)
+      }
+    })
+  })
 }
